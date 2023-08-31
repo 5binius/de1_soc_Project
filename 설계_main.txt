@@ -1,0 +1,611 @@
+#include <stdlib.h>
+#include "address_map_nios2.h"
+#include "nios2_ctrl_reg_macros.h"
+
+volatile int *KEY_ptr=(int*) KEY_BASE;
+volatile int  *TIMER_ptr=(int*) TIMER_BASE;
+volatile int  *TIMER_2_ptr=(int*) TIMER_2_BASE;
+volatile int  *HEX3_HEX0_ptr=(int*) HEX3_HEX0_BASE; //HEX3_HEX0_BASE의 주소를 HEX3_HEX0_ptr포인터에 넘겨줌
+volatile int  *HEX5_HEX4_ptr=(int*) HEX5_HEX4_BASE; //HEX5_HEX4_BASE의 주소를 HEX5_HEX4_ptr포인터에 넘겨줌
+volatile int  *SW_ptr=(int*) SW_BASE;
+volatile int *PS_ptr=(int*) PS2_BASE;
+
+void keyboard();
+void timer();
+void timer2();
+void KEYs();
+void enable_nios2_interrupts();
+
+
+ volatile int now_year =0 ;		//외부변수들 불러오는 과정
+ volatile int now_month =0 ;
+ volatile int now_day =0 ;
+
+volatile int now_time_HH = 0;	//현재 시간 저장 변수
+volatile int now_time_MM = 0;
+volatile int now_time_SS = 0;
+
+volatile int timer_HH = 0;	//second timer 구동시간 저장 위한 변수
+volatile int timer_MM = 0;
+volatile int timer_SS = 0;
+
+volatile int record_status=0;
+
+volatile int timer_record1_HH = 0;	//timer record 1시간 저장 위한 변수
+volatile int timer_record1_MM = 0;
+volatile int timer_record1_SS = 0;
+
+volatile int timer_record2_HH = 0;	//timer record 1시간 저장 위한 변수
+volatile int timer_record2_MM = 0;
+volatile int timer_record2_SS = 0;
+
+volatile int alarm1_HH = 0;	//alarm1~4 까지의 시간 저장 변수
+volatile int alarm1_MM = 0;
+volatile int alarm1_SS = 0;
+volatile int alarm1_on = 0;
+
+volatile int alarm2_HH = 0;
+volatile int alarm2_MM = 0;
+volatile int alarm2_SS = 0;
+volatile int alarm2_on = 0;
+
+volatile int alarm3_HH = 0;
+volatile int alarm3_MM = 0;
+volatile int alarm3_SS = 0;
+volatile int alarm3_on = 0;
+
+volatile int alarm4_HH = 0;
+volatile int alarm4_MM = 0;
+volatile int alarm4_SS = 0;
+volatile int alarm4_on = 0;
+
+volatile int alarm_con=0;
+
+
+int timer_run = 1; 		// timer 동작 여부 변수
+int timer2_run = 1; 		// second timer 동작 여부 변수
+
+
+//-----------------  DISPLAY 함수 선언 및 초기화 부분 ------------------------------
+
+
+#include <stdlib.h>
+#include "address_map_nios2.h"
+
+#define PIXEL(r,g,b) (short int)((((r)&0x1F)<<11)|(((g)&0x3F)<<5)|(((b)&0x1F)))
+#define FILL_PIXEL(x,y,r,g,b) *(short int *)(pixel_buffer_start+(((y)&0xFF)<<10)+(((x)&0x1FF)<<1))=PIXEL(r,g,b)
+
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
+
+volatile int pixel_buffer_start;
+volatile int *pixel_ctrl_ptr;
+volatile char *character_buffer = (char*)0x09000000;
+
+void clear_screen();
+void draw_square(int,int,int,int,int,int,int);
+void wait_for_vsync();
+void display_char(int,int ,char *);
+void only_divide(int , int *, int *);
+void all_num_display(int,int,int,int,int,int);
+void one_num_display(int, int, int, int);
+void alarm_num_display(int,int,int,int,int,int);
+void date_display(int, int, int , int ,int , int );
+
+
+short int front_buffer[512*256];
+short int back_buffer[512*256];
+
+//----------------------------------알람음 기본설정-------------------------------------------
+#define BUF_SIZE 50000    // about 2 seconds of buffer (@ 48K samples/sec)
+#define BUF_THRESHOLD 96    // 75% of 128 word buffer
+
+void check_KEYs(int *,int *);
+
+
+//---------------------------------------------  main ------------------------------
+
+int main(void)
+{
+	keyboard();
+	
+	//------------------------------알람 입력 설정 -----------------------------
+	volatile int * pLED = (int *) LEDR_BASE; // red LED address
+  	 volatile int * pAudio = (int *) AUDIO_BASE;
+
+   	int buffer_index=0;
+   	int ri,wi;
+
+   	int left_buffer[BUF_SIZE];
+   	int right_buffer[BUF_SIZE];
+	
+   	int record, play;
+   	record = 0; play = 0;
+
+   	*(pLED) = 0;
+   	*pAudio=3;
+
+	int alarm_input = 0;
+
+   	while(1)
+   	{	
+         check_KEYs ( &record, &play );
+         if (record)
+         {
+		alarm_input = 1;
+           	 *pLED=0x1;
+            	ri=(((*pAudio)&0x100)>>8);
+            	if(ri==1)
+            	{
+               		buffer_index=0;
+
+               		while(buffer_index<BUF_SIZE)
+               		{
+                  		left_buffer[buffer_index]=*(pAudio+2);
+                  		right_buffer[buffer_index]=*(pAudio+3);
+                  		buffer_index++;
+	
+                  		ri=(((*pAudio)&0x100)>>8);
+                  		if(ri==0)
+                     			while(ri==0){ri=(((*pAudio)&0x100)>>8);}
+               		}
+         	}
+            	*pLED=0x0;
+		break;
+         }
+         record=0;
+         play=0;
+
+   	}
+
+	//-------------------------------타이머 및 인터럽트 , 버튼 설정 ---------------
+	timer();
+	timer2();
+	KEYs();
+	enable_nios2_interrupts( );
+	
+	//---------------------------------display------------------------------------
+	pixel_ctrl_ptr=(int *) PIXEL_BUF_CTRL_BASE;	// pixel controller
+	*(pixel_ctrl_ptr+1)=front_buffer;		// first store the address in the back buffer
+	wait_for_vsync();				// swap front and back buffers on VGA vertical sync
+	
+	pixel_buffer_start=*pixel_ctrl_ptr;
+	clear_screen();					// pixel_buffer_start points to the pixel buffer
+	*(pixel_ctrl_ptr+1)=back_buffer;		// set a location for the back pixel buffer in the pixel buffer controller
+	
+	//---------------------------------char buffer 초기화--------------------------
+	char *Maker;
+   	char maker[12] = {"Made by LJ"};
+   	Maker = maker;
+
+	char *Clock;
+	char clock[20] = {"Digital Clock"};
+   	Clock = clock;
+
+	char *Timer;
+	char timer[8] = {"Timer"};
+   	Timer = timer;
+
+	char *Alarm;  
+	char alarm[8] = {"Alarm"};
+   	Alarm = alarm; 	
+
+	char *Date;  
+	char date[8] = {"Date"};
+   	Date = date;
+
+	while(alarm_input)				//display 부분
+	{
+	//-------------------------------알람음 출력------------------------------
+	 if(alarm4_on==1){
+            if(alarm4_HH==now_time_HH){
+               if(alarm4_MM==now_time_MM){
+                   	*pLED=0x2;
+
+            		wi=(((*pAudio)&0x200)>>9);
+            		if(wi==1)
+            		{
+              			 buffer_index=0;
+
+               			while(buffer_index<BUF_SIZE)
+               			{
+                  			*(pAudio+2)=left_buffer[buffer_index];
+                  			*(pAudio+3)=right_buffer[buffer_index];
+                  			buffer_index++;
+
+                  			wi=(((*pAudio)&0x200)>>9);
+                  			if(wi==0)
+                  			{
+                    				 while(wi==0){wi=(((*pAudio)&0x200)>>9);}
+                  			}
+              			}
+            		}
+           		 *pLED=0x0; 
+	}}}
+
+         if(alarm3_on==1){
+            if(alarm3_HH==now_time_HH){
+               if(alarm3_MM==now_time_MM){
+                   	*pLED=0x2;
+
+            		wi=(((*pAudio)&0x200)>>9);
+            		if(wi==1)
+            		{
+              			 buffer_index=0;
+
+               			while(buffer_index<BUF_SIZE)
+               			{
+                  			*(pAudio+2)=left_buffer[buffer_index];
+                  			*(pAudio+3)=right_buffer[buffer_index];
+                  			buffer_index++;
+
+                  			wi=(((*pAudio)&0x200)>>9);
+                  			if(wi==0)
+                  			{
+                    				 while(wi==0){wi=(((*pAudio)&0x200)>>9);}
+                  			}
+              			}
+            		}
+           		 *pLED=0x0; 
+		}}}
+
+         if(alarm2_on==1){
+            if(alarm2_HH==now_time_HH){
+               if(alarm2_MM==now_time_MM){
+                   	*pLED=0x2;
+
+            		wi=(((*pAudio)&0x200)>>9);
+            		if(wi==1)
+            		{
+              			 buffer_index=0;
+
+               			while(buffer_index<BUF_SIZE)
+               			{
+                  			*(pAudio+2)=left_buffer[buffer_index];
+                  			*(pAudio+3)=right_buffer[buffer_index];
+                  			buffer_index++;
+
+                  			wi=(((*pAudio)&0x200)>>9);
+                  			if(wi==0)
+                  			{
+                    				 while(wi==0){wi=(((*pAudio)&0x200)>>9);}
+                  			}
+              			}
+            		}
+           		 *pLED=0x0; 
+		}}}
+
+         if(alarm1_on==1){
+            if(alarm1_HH==now_time_HH){
+               if(alarm1_MM==now_time_MM){
+                   	*pLED=0x2;
+
+            		wi=(((*pAudio)&0x200)>>9);
+            		if(wi==1)
+            		{
+              			 buffer_index=0;
+
+               			while(buffer_index<BUF_SIZE)
+               			{
+                  			*(pAudio+2)=left_buffer[buffer_index];
+                  			*(pAudio+3)=right_buffer[buffer_index];
+                  			buffer_index++;
+
+                  			wi=(((*pAudio)&0x200)>>9);
+                  			if(wi==0)
+                  			{
+                    				 while(wi==0){wi=(((*pAudio)&0x200)>>9);}
+                  			}
+              			}
+            		}
+           		 *pLED=0x0; 
+		}}}
+
+	//-----------------------------------화면 디스플레이 ------------------------------
+		pixel_buffer_start=*(pixel_ctrl_ptr+1);	// we draw on the back buffer
+		clear_screen;
+		
+		display_char(67,1,Maker);
+		display_char(5,2,Clock);
+		display_char(5,30,Timer);
+		display_char(60,30,Alarm);
+		display_char(33,49,Date);
+			
+
+		all_num_display( now_time_HH, now_time_MM, now_time_SS, 20,20,4);  //현재시간 display 
+
+		all_num_display( timer_HH,timer_MM, timer_SS, 20,130,2);  //타이머 display
+
+		all_num_display(timer_record1_HH, timer_record1_MM, timer_record1_SS, 20,180,1);  //타이머 record1 display
+		all_num_display(timer_record2_HH, timer_record2_MM, timer_record2_SS, 20,205,1);  //타이머 record2 display
+
+		alarm_num_display( alarm1_HH, alarm1_MM, alarm1_on, 230,130,1);  //알람 1
+		alarm_num_display( alarm2_HH, alarm2_MM, alarm2_on, 230,155,1);  //알람 2
+		alarm_num_display( alarm3_HH, alarm3_MM, alarm3_on, 230,180,1);  //알람 3
+		alarm_num_display( alarm4_HH, alarm4_MM, alarm4_on, 230,205,1);  //알람 4
+
+		date_display(now_year, now_month, now_day, 130,205,1);
+
+		wait_for_vsync();
+	}
+}
+void keyboard()
+{
+        int status = 0b01;
+        
+        *(PS_ptr) = status<<14;
+        *(PS_ptr + 1)=0x1;
+}
+
+void check_KEYs(int *K1,int *K2)		//알람음 입력을 위한 check key 함수
+{
+   volatile int *p=(int *) KEY_BASE;
+
+   int i;
+   i=*(p+3);   //read the pushbutton interrupt register
+   *(p+3)=i;   //clear the interrupt
+
+   if(i==0x2)
+   {
+      *K1=1;
+   }
+   else if(i==0x4)
+   {
+      *K2=1;
+   }
+}
+
+void clear_screen(){					// 스크린을 흰색으로 초기화
+	int x, y;
+	
+	for(x=0;x<SCREEN_WIDTH;x++){
+		for(y=0;y<SCREEN_HEIGHT;y++){
+			FILL_PIXEL(x,y,0x00,0x00,0x00);	// FILL_PIXEL함수 호출
+		}
+	}
+}
+
+void draw_square(int x0,int y0,int x1,int y1,int r,int g,int b){	// 사각형을 그리는 함수
+	int x,y;
+	for(x=x0;x<x1;x++){
+		for(y=y0;y<y1;y++){
+			FILL_PIXEL(x,y,r,g,b);	// FILL_PIXEL함수 호출
+		}
+	}
+}
+
+void display_char(int x,int y,char *text_ptr)
+{
+   int offset;
+   offset = (y<<7)+x;
+   while(*(text_ptr))
+   {
+      *(character_buffer+offset)=*(text_ptr);
+      ++text_ptr;
+      ++offset;
+   }
+}
+
+void wait_for_vsync(){
+	register int status;
+	*pixel_ctrl_ptr=1;	// start the sychronization process
+	
+	status=*(pixel_ctrl_ptr+3);	// pixel buffer register 오프셋 12의 값을 status에 입력
+	while((status&0x01)!=0){
+		status=*(pixel_ctrl_ptr+3);	// status가 0(swap)이 될 때까지 유지
+	}
+}
+
+void timer()				//timer 함수
+{
+	*(TIMER_ptr+2)=100000000;	// 1초 주기의 period 
+	*(TIMER_ptr+3)=100000000>>16;	
+	*(TIMER_ptr+1)=0b111;		// START=1, CONT=1, ITO=1 셋팅
+}
+
+void timer2()				//second timer 함수 기본값 설정 위에것 베끼기
+{
+	*(TIMER_2_ptr+2)=1000000;	// 0.01초 주기의 period 
+	*(TIMER_2_ptr+3)=1000000>>16;	
+	*(TIMER_2_ptr+1)=0b1011;		// STOP =1, START=0, CONT=1, ITO=1 셋팅
+}
+
+
+void KEYs( )				//key함수
+{
+	*(KEY_ptr+2)=0b1111;		// interruptmask register에 0b100을 넣어 3key만 interrupt허용
+}
+
+void enable_nios2_interrupts( )		//enable_nios2_interrupts함수
+{
+	NIOS2_WRITE_IENABLE(0x87);	// level 0,1,2 interrupt를 허용 (second timer,key,timer,PS2)
+	NIOS2_WRITE_STATUS(0x1);	// status=1로 해서 전체 interrupt를 허용
+}
+
+void all_num_display(int H, int M, int S, int x,int y, int k) 	
+{	//H,M,S는 시계의 2자리 입력 숫자, x,y는 숫자 배열 시작좌표, k는 숫자의 크기 배수
+	int H_ten, H_one, M_ten, M_one, S_ten, S_one;   //각 시간을 1자리씩 나누어 배치할 변수들
+	
+	only_divide(H,&H_ten,&H_one);	//각 자리수로 나누어 저장
+	only_divide(M,&M_ten,&M_one);
+	only_divide(S,&S_ten,&S_one);
+
+	one_num_display(H_ten, x, y, k);
+	one_num_display(H_one, x+(12*k), y, k);
+
+	draw_square(x+(23*k),y+(6*k),x+(24*k),y+(7*k),255,255,255);	//시,분 사이 점 표현
+	draw_square(x+(23*k),y+(12*k),x+(24*k),y+(13*k),255,255,255);
+
+	one_num_display(M_ten, x+(25*k), y, k);
+	one_num_display(M_one, x+(37*k), y, k);
+
+	draw_square(x+(48*k),y+(6*k),x+(49*k),y+(7*k),255,255,255);	//분,초 사이 점 표현
+	draw_square(x+(48*k),y+(12*k),x+(49*k),y+(13*k),255,255,255);
+
+	one_num_display(S_ten, x+(50*k), y, k);
+	one_num_display(S_one, x+(62*k), y, k);
+}
+
+void date_display(int H, int M, int S, int x,int y, int k) 	
+{	//H,M,S는 시계의 은 2자리 입력 숫자, x,y는 숫자 배열 시작좌표, k는 숫자의 크기 배수
+	int H_ten, H_one, M_ten, M_one, S_ten, S_one;   //각 시간을 1자리씩 나누어 배치할 변수들
+	
+	only_divide(H,&H_ten,&H_one);	//각 자리수로 나누어 저장
+	only_divide(M,&M_ten,&M_one);
+	only_divide(S,&S_ten,&S_one);
+
+	one_num_display(H_ten, x, y, k);
+	one_num_display(H_one, x+(12*k), y, k);
+
+	draw_square(x+(23*k),y+(18*k),x+(24*k),y+(19*k),255,255,255);	//시,분 사이 점 표현
+
+	one_num_display(M_ten, x+(25*k), y, k);
+	one_num_display(M_one, x+(37*k), y, k);
+
+	draw_square(x+(48*k),y+(18*k),x+(49*k),y+(19*k),255,255,255);	//분,초 사이 점 표현
+
+	one_num_display(S_ten, x+(50*k), y, k);
+	one_num_display(S_one, x+(62*k), y, k);
+}
+
+
+void alarm_num_display(int H, int M, int S, int x,int y, int k) 	
+{	//H,M,S는 시계의 은 2자리 입력 숫자, x,y는 숫자 배열 시작좌표, k는 숫자의 크기 배수
+	int H_ten, H_one, M_ten, M_one, S_ten, S_one;   //각 시간을 1자리씩 나누어 배치할 변수들
+	
+	only_divide(H,&H_ten,&H_one);	//각 자리수로 나누어 저장
+	only_divide(M,&M_ten,&M_one);
+
+	if(S==0)
+	 draw_square(x+(10*k),y+(6*k),x+(16*k),y+(12*k),140,150,200);	//alarm on 확인등, gray
+	else if(S==1)
+	 draw_square(x+(10*k),y+(6*k),x+(16*k),y+(12*k),255,255,255);  //alarm off 확인등, white
+	
+
+	one_num_display(H_ten, x+(25*k), y, k);
+	one_num_display(H_one, x+(37*k), y, k);
+
+	draw_square(x+(48*k),y+(6*k),x+(49*k),y+(7*k),255,255,255);	//분,초 사이 점 표현
+	draw_square(x+(48*k),y+(12*k),x+(49*k),y+(13*k),255,255,255);
+
+	one_num_display(M_ten, x+(50*k), y, k);
+	one_num_display(M_one, x+(62*k), y, k);
+}
+
+void one_num_display(int num, int x, int y, int k)
+{	//한자리의 숫자만 절적한 7_segment 형식으로 display함수
+	
+	if(num == 0)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),255,255,255);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),0,0,0);  //7segment g자리
+	}
+	else if(num == 1)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),0,0,0);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),0,0,0);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),0,0,0);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),0,0,0);  //7segment g자리
+	}
+	else if(num == 2)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),0,0,0);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),255,255,255);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),0,0,0);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 3)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),0,0,0);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 4)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),0,0,0);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),0,0,0);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 5)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),0,0,0);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 6)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),0,0,0);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),255,255,255);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 7)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),0,0,0);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),0,0,0);  //7segment g자리
+	}
+	else if(num == 8)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),255,255,255);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+	else if(num == 9)
+	{
+		draw_square(x+(2*k),y,x+(8*k),y+(2*k),255,255,255);	//7segment a자리
+		draw_square(x+(8*k),y+(2*k),x+(10*k),y+(8*k),255,255,255);  //7segment b자리
+		draw_square(x+(8*k),y+(10*k),x+(10*k),y+(16*k),255,255,255);  //7segment c자리
+		draw_square(x+(2*k),y+(16*k),x+(8*k),y+(18*k),255,255,255);   //7segment d자리
+		draw_square(x,y+(10*k),x+(2*k),y+(16*k),0,0,0);  //7segment e자리
+		draw_square(x,y+(2*k),x+(2*k),y+(8*k),255,255,255);  //7segment f자리
+		draw_square(x+(2*k),y+(8*k),x+(8*k),y+(10*k),255,255,255);  //7segment g자리
+	}
+}
+		
+	
+
+void only_divide(int n , int *ten, int *one)
+{
+	int q,r;
+	q=n/10;				// n을 10으로 나눈 몫
+	r=n%10;				// n을 10으로 나눈 나머지
+	
+	*ten=q;		// ten이 가리키는 주소에 몫 저장
+	*one=r;		// one이 가리키는 주소에 나머지 저장
+} 		
+ 
